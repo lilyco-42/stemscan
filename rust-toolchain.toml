@@ -1,0 +1,4 @@
+# 钉住 toolchain：CI 与本地一致，避免 fmt/clippy 规则漂移导致毫无征兆地飘红。
+[toolchain]
+channel = "1.98.1"
+components = ["rustfmt", "clippy"]

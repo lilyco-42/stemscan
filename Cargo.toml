@@ -1,0 +1,20 @@
+[package]
+name = "stemscan"
+version = "0.1.0"
+edition = "2024"
+description = "判断一首歌是纯器乐(BGM)还是人声+伴奏 —— 音源分离 + 能量统计"
+license = "MIT"
+repository = "https://github.com/lilyco-42/stemscan"
+homepage = "https://github.com/lilyco-42/stemscan"
+keywords = ["audio", "music", "vocal", "source-separation", "cli"]
+categories = ["multimedia::audio", "command-line-utilities"]
+
+[dependencies]
+hound = "3.5.1"
+lilyco = "0.2.3"
+serde = "1.0.229"
+serde_json = "1.0.151"
+
+[profile.release]
+lto = "thin"
+strip = true

@@ -1,0 +1,7 @@
+# 仓库内一律 LF。Windows 上 core.autocrlf 会把检出改成 CRLF，
+# 于是「只改了几行」的 diff 会显示整个文件被重写。
+* text=auto eol=lf
+*.bat  text eol=crlf
+*.ps1  text eol=crlf
+*.png  binary
+*.wav  binary

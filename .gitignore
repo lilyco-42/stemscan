@@ -1,0 +1,6 @@
+/target
+/dist
+*.f32
+*.wav
+report*.json
+verify_vocals.json

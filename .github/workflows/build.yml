@@ -1,0 +1,134 @@
+name: Build
+
+# 跨平台 stemscan 构建：Windows(x64) · Linux(x64/arm64) · macOS(arm64/x64)
+# 打 v* tag 时自动发布 GitHub Release。
+#
+# 备注：
+#   - stemscan 运行时需要外部 ffmpeg 与 audio-separator（Python），**不打包进产物**，
+#     只发布裸二进制；用户在 README 里按说明自备。
+#   - 不做 Android：分离后端是 Python 生态，塞进 Termux 不现实，硬发只会误导人。
+
+on:
+  push:
+    branches: [main, master]
+    tags: ["v*"]
+  pull_request:
+    branches: [main, master]
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  # ============ 测试 ============
+  test:
+    name: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # 钉在当前 stable（= 1.98.1，2026-09-01），与 rust-toolchain.toml 一致。
+      # 不钉的话，某天 GitHub 一升 toolchain，`cargo fmt -- --check` 就会毫无征兆地飘红。
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+          toolchain: 1.98.1
+      - uses: Swatinem/rust-cache@v2
+      - name: Format check
+        run: cargo fmt -- --check
+      - name: Clippy
+        run: cargo clippy --all-targets --locked -- -D warnings
+      - name: Run tests
+        run: cargo test --locked
+
+  # ============ 构建矩阵 ============
+  build:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Windows x64
+            os: windows-latest
+            target: x86_64-pc-windows-msvc
+            ext: .exe
+          - name: Linux x64
+            os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            ext: ""
+          - name: Linux arm64
+            os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+            ext: ""
+          - name: macOS arm64
+            os: macos-14
+            target: aarch64-apple-darwin
+            ext: ""
+          - name: macOS x64
+            os: macos-13
+            target: x86_64-apple-darwin
+            ext: ""
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+          toolchain: 1.98.1
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+      - name: Build
+        run: cargo build --release --locked --target ${{ matrix.target }}
+      # 产物名带 triple，下载下来一眼知道是哪个平台，不会互相覆盖。
+      - name: Stage artifact
+        shell: bash
+        run: |
+          mkdir -p dist
+          cp "target/${{ matrix.target }}/release/stemscan${{ matrix.ext }}" \
+             "dist/stemscan-${{ matrix.target }}${{ matrix.ext }}"
+          ls -la dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: stemscan-${{ matrix.target }}
+          path: dist/*
+          if-no-files-found: error
+
+  # ============ 发布 ============
+  release:
+    name: Publish GitHub Release
+    # **必须等所有平台都产出再发版**。
+    # 只 needs: [build] 也能跑，但 matrix 里谁先跑完谁先上，
+    # 于是 Release 说明写着「支持 macOS」而 macOS 资产缺席 —— 这是竞态，不是偶发。
+    needs: [test, build]
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Show artifacts
+        run: find dist -type f | sort
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/**
+          generate_release_notes: true
+          body: |
+            ## 支持平台
+            - **Windows**: `stemscan-x86_64-pc-windows-msvc.exe`
+            - **Linux**: `stemscan-x86_64-unknown-linux-gnu` / `stemscan-aarch64-unknown-linux-gnu`
+            - **macOS**: `stemscan-aarch64-apple-darwin`（Apple Silicon）/ `stemscan-x86_64-apple-darwin`（Intel）
+
+            ## 运行前还要准备
+            1. `ffmpeg` / `ffprobe` 在 PATH
+            2. `pip install audio-separator audioread`
+            3. 首次运行会自动下载分离模型
+
+            ```sh
+            stemscan --input "你的音乐目录" --seconds 60 --out report.json
+            ```
