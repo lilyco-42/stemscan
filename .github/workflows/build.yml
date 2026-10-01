@@ -62,11 +62,16 @@ jobs:
             target: aarch64-unknown-linux-gnu
             ext: ""
           - name: macOS arm64
-            os: macos-14
+            os: macos-15
             target: aarch64-apple-darwin
             ext: ""
+          # macos-13 已被 GitHub 退役（现在只有 macos-14/15/26）。
+          # 用退役标签的后果不是报错，而是 job **永远 queued** —— release 又 needs 它，
+          # 于是整条流水线静默卡死。v0.1.0 第一次发版就这么卡了 12 分钟。
+          # 这里统一用 macos-15：Rust 从 arm64 runner 跨编到 x86_64-apple-darwin 没问题，
+          # runner 自带完整 Xcode SDK。
           - name: macOS x64
-            os: macos-13
+            os: macos-15
             target: x86_64-apple-darwin
             ext: ""
     steps:
