@@ -92,6 +92,12 @@ stemscan --schema                         # JSON Schema
 | `--active-threshold` | 15 | 人声活跃帧占比阈值 % |
 | `--keep-stems` | off | 保留分离出的音轨，便于交叉验证 |
 
+每次扫描使用独立临时目录，多个窗口或 MCP 任务不会互相删除音轨。默认在任务结束或失败时清理本次目录；
+使用 `--keep-stems` 时会保留它，并在日志及 JSON 的 `stems_directory`、`vocal_path`、`instrumental_path` 中提供位置。
+识别 `No_Vocals` / `Instrumental` / `Accompaniment` 为伴奏；同类音轨不唯一时明确报错，避免随机选错结果。
+
+桌面图形版仍在开发准备阶段；当前发行依然需要自行准备 FFmpeg 和音源分离后端，不把裸 CLI 称为开箱即用桌面软件。
+
 判定结果：
 
 | verdict | label |
