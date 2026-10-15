@@ -5,6 +5,8 @@
 //!
 //! 一个 struct，四种界面：CLI / TUI / Web / MCP。
 
+mod scratch;
+
 use lilyco::prelude::*;
 use serde_json::{Value, json};
 use std::path::{Path, PathBuf};
@@ -288,6 +290,41 @@ fn confidence(m: &Metrics, share_th: f64, active_th: f64) -> &'static str {
     }
 }
 
+fn find_stems(directory: &Path) -> Result<Option<(PathBuf, PathBuf)>, AppError> {
+    let (mut vocal, mut instrumental) = (None, None);
+    for entry in std::fs::read_dir(directory)? {
+        let path = entry?.path();
+        if !path.is_file() {
+            continue;
+        }
+        let name = path
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .to_lowercase();
+        if !name.ends_with(".wav") || name == "input.wav" {
+            continue;
+        }
+        // Negative vocal labels must precede the general "vocal" match.
+        let target = if name.contains("instrumental")
+            || name.contains("accompaniment")
+            || name.contains("no_vocal")
+        {
+            &mut instrumental
+        } else if name.contains("vocal") {
+            &mut vocal
+        } else {
+            continue;
+        };
+        if target.replace(path).is_some() {
+            return Err(AppError::Runtime(
+                "分离产物存在多个同类音轨，无法可靠配对".into(),
+            ));
+        }
+    }
+    Ok(vocal.zip(instrumental))
+}
+
 // ---------------------------------------------------------------- main
 
 fn run(app: &StemScan, ctx: &Context) -> Result<Value, AppError> {
@@ -302,8 +339,13 @@ fn run(app: &StemScan, ctx: &Context) -> Result<Value, AppError> {
         message: Some("开始扫描".into()),
     });
 
-    let tmp = std::env::temp_dir().join("stemscan");
-    std::fs::create_dir_all(&tmp)?;
+    let scratch = scratch::Scratch::new(app.keep_stems)?;
+    if app.keep_stems {
+        ctx.log(
+            LogLevel::Info,
+            format!("音轨保留目录: {}", scratch.path().display()),
+        );
+    }
 
     let share_th = app.threshold as f64;
     let active_th = app.active_threshold as f64;
@@ -323,9 +365,8 @@ fn run(app: &StemScan, ctx: &Context) -> Result<Value, AppError> {
         let full_dur = probe_duration(&app.ffmpeg, file);
 
         // 1) 解码成 44.1k 立体声 wav（可选截断前 N 秒）
-        let stem_dir = tmp.join(format!("run{idx}"));
-        let _ = std::fs::remove_dir_all(&stem_dir);
-        std::fs::create_dir_all(&stem_dir)?;
+        let stem_dir = scratch.path().join(format!("run{idx}"));
+        std::fs::create_dir(&stem_dir)?;
         let wav = stem_dir.join("input.wav");
 
         let mut args: Vec<String> = vec!["-y".into(), "-v".into(), "error".into()];
@@ -357,28 +398,7 @@ fn run(app: &StemScan, ctx: &Context) -> Result<Value, AppError> {
         run_cmd(&sep, &sargs)?;
 
         // 3) 找 stems
-        let mut voc: Option<PathBuf> = None;
-        let mut ins: Option<PathBuf> = None;
-        for e in std::fs::read_dir(&stem_dir)? {
-            let p = e?.path();
-            let n = p
-                .file_name()
-                .unwrap_or_default()
-                .to_string_lossy()
-                .to_lowercase();
-            if !n.ends_with(".wav") || n == "input.wav" {
-                continue;
-            }
-            if n.contains("vocal") {
-                voc = Some(p);
-            } else if n.contains("instrumental")
-                || n.contains("accompaniment")
-                || n.contains("no_vocal")
-            {
-                ins = Some(p);
-            }
-        }
-        let (Some(vp), Some(ip)) = (voc, ins) else {
+        let Some((vp, ip)) = find_stems(&stem_dir)? else {
             ctx.log(LogLevel::Warn, format!("{name}: 分离产物缺失，跳过"));
             continue;
         };
@@ -413,6 +433,8 @@ fn run(app: &StemScan, ctx: &Context) -> Result<Value, AppError> {
             "active_frame_ratio_pct": (m.active_ratio * 1000.0).round() / 10.0,
             "vocal_rms_db": (m.vocal_rms_db * 10.0).round() / 10.0,
             "instrumental_rms_db": (m.inst_rms_db * 10.0).round() / 10.0,
+            "vocal_path": app.keep_stems.then(|| vp.to_string_lossy().into_owned()),
+            "instrumental_path": app.keep_stems.then(|| ip.to_string_lossy().into_owned()),
         }));
 
         if !app.keep_stems {
@@ -432,6 +454,7 @@ fn run(app: &StemScan, ctx: &Context) -> Result<Value, AppError> {
         "vocal": vocal_n,
         "instrumental": inst_n,
         "thresholds": { "vocal_share_pct": share_th, "active_frame_pct": active_th },
+        "stems_directory": app.keep_stems.then(|| scratch.path().to_string_lossy().into_owned()),
         "results": results,
     });
 
@@ -526,9 +549,8 @@ mod tests {
 
     #[test]
     fn analyze_separates_vocal_track_from_instrumental() {
-        let dir = std::env::temp_dir().join("stemscan_test_analyze");
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
+        let scratch = scratch::Scratch::new(false).unwrap();
+        let dir = scratch.path();
         let (v, i) = (dir.join("v.wav"), dir.join("i.wav"));
 
         let n = 44100 * 4; // 4s
@@ -545,14 +567,12 @@ mod tests {
         let mi = analyze(&v, &i).unwrap();
         assert!(mi.vocal_share_pct < 1.0, "share={}", mi.vocal_share_pct);
         assert_eq!(verdict(&mi, 2.0, 15.0).0, "instrumental");
-
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn collect_inputs_filters_non_audio_and_respects_recursion() {
-        let dir = std::env::temp_dir().join("stemscan_test_collect");
-        let _ = std::fs::remove_dir_all(&dir);
+        let scratch = scratch::Scratch::new(false).unwrap();
+        let dir = scratch.path();
         let sub = dir.join("sub");
         std::fs::create_dir_all(&sub).unwrap();
         for p in [
@@ -565,14 +585,37 @@ mod tests {
             std::fs::write(&p, b"x").unwrap();
         }
 
-        let flat = collect_inputs(&dir, false).unwrap();
+        let flat = collect_inputs(dir, false).unwrap();
         assert_eq!(flat.len(), 2, "非递归只收顶层音频: {flat:?}");
 
-        let deep = collect_inputs(&dir, true).unwrap();
+        let deep = collect_inputs(dir, true).unwrap();
         assert_eq!(deep.len(), 3, "递归要收子目录: {deep:?}");
 
         assert!(collect_inputs(&dir.join("a.mp3"), false).is_ok());
-        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn no_vocals_is_the_instrumental_track_for_actual_waveform_analysis() {
+        let scratch = scratch::Scratch::new(false).unwrap();
+        let vocal = scratch.path().join("input_(Vocals).wav");
+        let instrumental = scratch.path().join("input_(No_Vocals).wav");
+        write_wav(&vocal, &steady(0.00001, 44100));
+        write_wav(&instrumental, &steady(0.30, 44100));
+        write_wav(&scratch.path().join("input.wav"), &steady(0.30, 44100));
+        let (detected_vocal, detected_instrumental) = find_stems(scratch.path()).unwrap().unwrap();
+        assert_eq!(detected_vocal, vocal);
+        assert_eq!(detected_instrumental, instrumental);
+        let metrics = analyze(&detected_vocal, &detected_instrumental).unwrap();
+        assert_eq!(verdict(&metrics, 2.0, 15.0).0, "instrumental");
+    }
+
+    #[test]
+    fn ambiguous_stems_fail_instead_of_using_directory_iteration_order() {
+        let scratch = scratch::Scratch::new(false).unwrap();
+        for name in ["model1_Vocals.wav", "model2_Vocals.wav", "Instrumental.wav"] {
+            std::fs::write(scratch.path().join(name), b"ambiguous result").unwrap();
+        }
+        assert!(find_stems(scratch.path()).is_err());
     }
 
     #[test]
